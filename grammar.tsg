@@ -1,0 +1,618 @@
+// Hare grammar for tree-sitter (native DSL).
+// Translated from grammar.js.
+
+let PREC = {
+    PARENTHESES: -1,
+    ASSIGNMENT: 0,
+    LOGICAL_XOR: 1,
+    LOGICAL_OR: 2,
+    LOGICAL_AND: 3,
+    BITWISE_OR: 4,
+    BITWISE_XOR: 5,
+    BITWISE_AND: 6,
+    EQUALITY: 7,
+    COMPARE: 8,
+    SHIFT: 9,
+    ADD: 10,
+    MULTIPLY: 11,
+    CAST: 12,
+    UNARY: 13,
+    CALL: 14,
+    MEMBER: 15,
+}
+
+let builtin_types: list_t<str_t> = [
+    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+    "int", "uint", "size", "uintptr", "char", "f32", "f64",
+    "rune", "str", "bool", "void",
+]
+
+macro comma_sep1(rule: rule_t) rule_t {
+    seq(rule, repeat(seq(",", rule)))
+}
+
+macro comma_sep(rule: rule_t) rule_t { optional(comma_sep1(rule)) }
+
+macro optional_comma_sep(rule: rule_t) rule_t {
+    seq(comma_sep(rule), optional(","))
+}
+
+macro optional_comma_sep1(rule: rule_t) rule_t {
+    seq(comma_sep1(rule), optional(","))
+}
+
+macro binop_l(p: int_t, op: rule_t) rule_t {
+    prec_left(p, seq(
+        field(left, expression),
+        field(operator, op),
+        field(right, expression),
+    ))
+}
+
+grammar {
+    language: "hare",
+    conflicts: [[builtin_type, void]],
+    extras: [comment, regexp(r"\s")],
+    supertypes: [declaration, expression, literal, statement, type],
+    word: identifier,
+}
+
+rule module {
+    seq(optional(imports), optional(declarations))
+}
+
+rule imports { repeat1(use_statement) }
+
+rule use_statement {
+    seq(
+        "use",
+        choice(
+            seq(identifier, "=", identifier),
+            seq(
+                choice(identifier, scoped_type_identifier),
+                optional(seq(
+                    "::",
+                    choice(
+                        seq("{", optional_comma_sep1(identifier), "}"),
+                        "*",
+                    ),
+                )),
+            ),
+        ),
+        ";",
+    )
+}
+
+rule name_list { optional_comma_sep1(identifier) }
+
+rule declarations {
+    repeat1(seq(optional("export"), declaration, ";"))
+}
+
+rule declaration {
+    choice(global_declaration, constant_declaration, type_declaration, function_declaration)
+}
+
+rule global_declaration {
+    seq(choice("const", "let"), comma_sep1(global_binding))
+}
+
+rule global_binding {
+    seq(
+        optional(declaration_attribute),
+        optional("@threadlocal"),
+        identifier,
+        choice(
+            seq(":", type, optional(seq("=", expression))),
+            seq("=", expression),
+        ),
+    )
+}
+
+rule declaration_attribute { seq("@symbol", "(", string, ")") }
+
+rule constant_declaration {
+    seq("def", comma_sep1(seq(identifier, ":", type, "=", expression)))
+}
+
+rule type_declaration {
+    seq("type", optional_comma_sep1(seq(identifier, "=", type)))
+}
+
+rule function_declaration {
+    seq(
+        repeat(function_attribute),
+        "fn",
+        field(name, identifier),
+        "(",
+        optional_comma_sep(parameter),
+        ")",
+        field(returns, optional(type)),
+        optional(seq("=", field(body, expression))),
+    )
+}
+
+rule function_attribute {
+    choice("@fini", "@init", "@test", "@noreturn", declaration_attribute)
+}
+
+rule parameter {
+    seq(choice(identifier, "_"), ":", type, optional("..."))
+}
+
+rule type {
+    choice(
+        identifier, scoped_type_identifier, builtin_type,
+        pointer_type, const_type, error_type, array_type,
+        enum_type, slice_type, struct_type, tuple_type,
+        union_type, tagged_union_type, function_type, unwrapped_type,
+    )
+}
+
+rule builtin_type { choice(for (t: str_t) in builtin_types { t }) }
+
+rule pointer_type { seq(optional("nullable"), "*", type) }
+
+rule const_type { seq("const", type) }
+
+rule error_type { seq("!", type) }
+
+rule array_type { seq("[", "]", type) }
+
+rule enum_type {
+    seq(
+        "enum",
+        optional(builtin_type),
+        "{",
+        optional_comma_sep1(enum_field),
+        "}",
+    )
+}
+
+rule slice_type {
+    seq(
+        "[",
+        field(size, choice("_", "*", expression)),
+        "]",
+        type,
+    )
+}
+
+rule struct_type {
+    seq(
+        "struct",
+        optional("@packed"),
+        "{",
+        optional_comma_sep1(field),
+        "}",
+    )
+}
+
+rule tuple_type { seq("(", comma_sep(type), ")") }
+
+rule union_type { seq("union", "{", optional_comma_sep1(field), "}") }
+
+rule tagged_union_type {
+    seq("(", type, repeat1(seq("|", type)), ")")
+}
+
+rule function_type {
+    prec_right(0, seq(
+        optional(function_attribute),
+        "fn",
+        "(",
+        optional_comma_sep(parameter),
+        ")",
+        field(returns, optional(type)),
+    ))
+}
+
+rule unwrapped_type { seq("...", type) }
+
+rule enum_field {
+    seq(identifier, optional(seq("=", expression)))
+}
+
+rule field {
+    seq(
+        optional(offset_specifier),
+        choice(
+            seq(identifier, ":", type),
+            struct_type,
+            union_type,
+            identifier,
+            scoped_type_identifier,
+        ),
+    )
+}
+
+rule offset_specifier { seq("@offset", "(", expression, ")") }
+
+rule statement {
+    choice(
+        break_statement, defer_statement, yield_statement,
+        static_operation, let_declaration, const_declaration,
+        expression_statement,
+    )
+}
+
+rule expression_statement { seq(expression, ";") }
+
+rule block { seq(optional(label), "{", repeat(statement), "}") }
+
+rule if_statement {
+    prec_right(0, seq(
+        "if",
+        "(",
+        field(condition, expression),
+        ")",
+        field(consequence, expression),
+        optional(else_statement),
+    ))
+}
+
+rule else_statement {
+    prec_right(0, seq("else", field(alternative, expression)))
+}
+
+rule for_statement {
+    prec_right(0, seq(
+        "for",
+        "(",
+        optional(seq(let_expression, ";")),
+        seq(
+            field(condition, expression),
+            optional(seq(";", field(afterthought, expression))),
+        ),
+        ")",
+        field(body, expression),
+    ))
+}
+
+rule label { seq(":", field(label, identifier)) }
+
+rule break_statement { seq("break", optional(label), ";") }
+
+rule defer_statement { seq("defer", statement) }
+
+rule return_statement {
+    prec_right(0, seq("return", optional(expression)))
+}
+
+rule yield_statement {
+    seq(
+        "yield",
+        optional(choice(
+            seq(label, ",", expression),
+            expression,
+        )),
+        ";",
+    )
+}
+
+rule static_operation { seq("static", expression, ";") }
+
+rule let_declaration {
+    seq(
+        optional("static"),
+        "let",
+        comma_sep1(seq(
+            choice(identifier, tuple_literal),
+            optional(seq(":", type)),
+            optional(seq("=", expression)),
+        )),
+        ";",
+    )
+}
+
+rule const_declaration {
+    seq(
+        optional("static"),
+        "const",
+        comma_sep1(seq(
+            choice(identifier, tuple_literal),
+            optional(seq(":", type)),
+            "=",
+            expression,
+        )),
+        ";",
+    )
+}
+
+rule expression {
+    prec_right(0, choice(
+        assignment_expression, update_expression,
+        unary_expression, binary_expression,
+        size_expression, call_expression,
+        error_assertion_expression, cast_expression,
+        index_expression, range_expression, member_expression,
+        try_expression, parenthesis_expression,
+        if_statement, for_statement, return_statement,
+        switch_expression, match_expression, block,
+        identifier, scoped_type_identifier,
+        literal,
+    ))
+}
+
+rule assignment_expression {
+    prec_right(PREC.ASSIGNMENT, seq(expression, "=", expression))
+}
+
+rule update_expression {
+    prec_right(PREC.ASSIGNMENT, seq(
+        expression,
+        choice(
+            "+=", "-=", "*=", "/=", "%=",
+            "<<=", ">>=", "|=", "&=", "^=",
+            "||=", "&&=", "^^=",
+        ),
+        expression,
+    ))
+}
+
+rule unary_expression {
+    choice(
+        prec_right(PREC.UNARY, seq(
+            field(operator, choice("+", "-", "~", "!", "*")),
+            field(argument, expression),
+        )),
+        prec_right(PREC.UNARY, seq(
+            field(address, "&"),
+            field(argument, expression),
+        )),
+    )
+}
+
+rule binary_expression {
+    choice(
+        binop_l(PREC.ADD, "+"),
+        binop_l(PREC.ADD, "-"),
+        binop_l(PREC.MULTIPLY, "*"),
+        binop_l(PREC.MULTIPLY, "/"),
+        binop_l(PREC.MULTIPLY, "%"),
+        binop_l(PREC.LOGICAL_OR, "||"),
+        binop_l(PREC.LOGICAL_AND, "&&"),
+        binop_l(PREC.LOGICAL_XOR, "^^"),
+        binop_l(PREC.BITWISE_OR, "|"),
+        binop_l(PREC.BITWISE_AND, "&"),
+        binop_l(PREC.BITWISE_XOR, "^"),
+        binop_l(PREC.EQUALITY, "=="),
+        binop_l(PREC.EQUALITY, "!="),
+        binop_l(PREC.COMPARE, ">"),
+        binop_l(PREC.COMPARE, ">="),
+        binop_l(PREC.COMPARE, "<="),
+        binop_l(PREC.COMPARE, "<"),
+        binop_l(PREC.SHIFT, "<<"),
+        binop_l(PREC.SHIFT, ">>"),
+    )
+}
+
+rule error_assertion_expression { seq(expression, "!") }
+
+rule cast_expression {
+    prec(PREC.CAST, choice(
+        field(type_cast, seq(expression, ":", type)),
+        field(as_cast, seq(expression, "as", type)),
+        field(is_cast, seq(expression, "is", type)),
+    ))
+}
+
+rule size_expression { seq("size", "(", type, ")") }
+
+rule call_expression {
+    prec(PREC.CALL, seq(
+        field(callee, expression),
+        "(",
+        optional_comma_sep(choice(expression, variadic_argument)),
+        ")",
+    ))
+}
+
+rule variadic_argument { seq(expression, "...") }
+
+rule index_expression {
+    prec(PREC.MEMBER, seq(expression, "[", expression, "]"))
+}
+
+rule range_expression {
+    prec(PREC.MEMBER, seq(
+        expression, "[",
+        optional(expression),
+        "..",
+        optional(expression),
+        "]",
+    ))
+}
+
+rule member_expression {
+    prec(PREC.MEMBER, seq(expression, ".", choice(identifier, number)))
+}
+
+rule try_expression { seq(expression, "?") }
+
+rule parenthesis_expression {
+    prec(PREC.PARENTHESES, seq("(", expression, ")"))
+}
+
+rule let_expression {
+    seq(
+        "let",
+        comma_sep1(seq(
+            identifier,
+            optional(seq(":", type)),
+            optional(seq("=", expression)),
+        )),
+    )
+}
+
+rule switch_expression {
+    seq("switch", expression, "{", repeat(case), "}")
+}
+
+rule match_expression {
+    seq("match", expression, "{", repeat(case), "}")
+}
+
+rule case {
+    seq(
+        "case",
+        optional(choice(comma_sep1(expression), let_expression, array_type, builtin_type)),
+        "=>",
+        repeat1(statement),
+    )
+}
+
+rule literal {
+    choice(
+        array_literal, struct_literal, tuple_literal,
+        number, float, string, raw_string, concatenated_string,
+        rune, boolean, void, null,
+    )
+}
+
+rule array_literal {
+    prec_right(0, seq(
+        "[",
+        optional_comma_sep(seq(expression, optional("..."))),
+        "]",
+    ))
+}
+
+rule struct_literal {
+    choice(
+        seq("struct", "{", optional_comma_sep1(field_assignment), "}"),
+        seq(
+            choice(identifier, scoped_type_identifier),
+            "{",
+            choice(
+                seq(comma_sep1(field_assignment), optional(seq(",", optional("...")))),
+                "...",
+            ),
+            "}",
+        ),
+    )
+}
+
+rule field_assignment {
+    choice(
+        seq(identifier, "=", expression),
+        seq(identifier, ":", type, "=", expression),
+        struct_literal,
+    )
+}
+
+rule tuple_literal {
+    seq("(", optional_comma_sep1(expression), ")")
+}
+
+rule number {
+    choice(
+        seq(
+            token(choice(
+                regexp(r"0|[1-9][0-9]*"),
+                regexp(r"0x[0-9a-fA-F][0-9a-fA-F]*"),
+                regexp(r"0o[0-7][0-7]*"),
+                regexp(r"0b[01][01]*"),
+            )),
+            optional(integer_suffix),
+        ),
+        seq(
+            token(seq(
+                regexp(r"0|[1-9][0-9]*"),
+                optional(seq(
+                    choice("e", "E"),
+                    optional(choice("+", "-")),
+                    regexp(r"[0-9]+"),
+                )),
+            )),
+            optional(integer_suffix),
+        ),
+    )
+}
+
+rule float {
+    choice(
+        token(seq(
+            regexp(r"[0-9]+"),
+            ".",
+            regexp(r"[0-9]+"),
+            optional(seq(
+                choice("e", "E"),
+                optional(choice("+", "-")),
+                regexp(r"[0-9]+"),
+            )),
+            optional(choice("f32", "f64")),
+        )),
+        token(seq(
+            regexp(r"[0-9]+"),
+            optional(seq(
+                choice("e", "E"),
+                optional(choice("+", "-")),
+                regexp(r"[0-9]+"),
+            )),
+            choice("f32", "f64"),
+        )),
+    )
+}
+
+rule integer_suffix {
+    choice("i", "u", "z", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
+}
+
+rule string {
+    seq("\"", repeat(choice(string_content, _escape_sequence)), "\"")
+}
+
+rule raw_string { seq("`", raw_string_content, "`") }
+
+rule concatenated_string { seq(string, repeat1(string)) }
+
+rule string_content { token(prec(1, regexp(r#"[^"\\]+"#))) }
+
+rule raw_string_content { token(prec(1, regexp(r"[^`]*"))) }
+
+rule rune {
+    seq(
+        "'",
+        choice(token_immediate(regexp(r"[^\']")), _escape_sequence),
+        "'",
+    )
+}
+
+rule _escape_sequence {
+    choice(
+        prec(2, token_immediate(seq("\\", regexp(r#"[^abfnrtvxu'"\\?]"#)))),
+        prec(1, escape_sequence),
+    )
+}
+
+rule escape_sequence {
+    token_immediate(seq("\\", choice(
+        regexp(r"[^xu0-7]"),
+        regexp(r"[0-7]{1,3}"),
+        regexp(r"x[0-9a-fA-F]{2}"),
+        regexp(r"u[0-9a-fA-F]{4}"),
+        regexp(r"u\{[0-9a-fA-F]+\}"),
+        regexp(r"U[0-9a-fA-F]{8}"),
+    )))
+}
+
+rule boolean { choice("true", "false") }
+
+rule void { "void" }
+
+rule null { "null" }
+
+rule scoped_type_identifier {
+    seq(
+        field(path, choice(identifier, scoped_type_identifier)),
+        "::",
+        field(name, identifier),
+    )
+}
+
+rule identifier { regexp(r"[a-zA-Z_][a-zA-Z0-9_]*") }
+
+rule comment {
+    token(seq("//", regexp(r"(\\(.|\r?\n)|[^\\\n])*")))
+}
